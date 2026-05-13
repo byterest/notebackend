@@ -1,0 +1,8 @@
+.env
+note.db
+note.db-*
+uploads/
+*.exe
+*.dll
+*.so
+*.dylib
