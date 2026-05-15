@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"net/http"
 
+	"note-backend/internal/ai"
 	"note-backend/internal/auth"
 	"note-backend/internal/canvas"
 	"note-backend/internal/config"
@@ -18,6 +19,7 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 	authHandler := auth.NewHandler(authStore)
 	canvasHandler := canvas.NewHandler(canvas.NewStore(db))
 	uploadHandler := upload.NewHandler(cfg.UploadDir, cfg.MaxUploadSize)
+	aiHandler := ai.NewHandler(cfg.AIBaseURL, cfg.AIAPIKey, cfg.AIModel)
 
 	router := gin.Default()
 	router.MaxMultipartMemory = cfg.MaxUploadSize
@@ -45,6 +47,7 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 			protected.PUT("/canvases/:id", canvasHandler.Update)
 			protected.DELETE("/canvases/:id", canvasHandler.Delete)
 			protected.POST("/uploads/images", uploadHandler.Image)
+			protected.POST("/ai/generate", aiHandler.Generate)
 		}
 	}
 

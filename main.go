@@ -7,9 +7,12 @@ import (
 	"note-backend/internal/config"
 	"note-backend/internal/database"
 	"note-backend/internal/server"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
+	_ = godotenv.Load()
 	cfg := config.Load()
 
 	if err := os.MkdirAll(cfg.UploadDir, 0o755); err != nil {

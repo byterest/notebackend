@@ -16,6 +16,9 @@ type Config struct {
 	UploadDir      string
 	SessionTTL     time.Duration
 	MaxUploadSize  int64
+	AIBaseURL      string
+	AIAPIKey       string
+	AIModel        string
 }
 
 // Load reads configuration from environment variables and applies sane defaults.
@@ -27,6 +30,9 @@ func Load() Config {
 		UploadDir:      envOrDefault("UPLOAD_DIR", "./uploads"),
 		SessionTTL:     30 * 24 * time.Hour,
 		MaxUploadSize:  defaultMaxUploadSize,
+		AIBaseURL:      envOrDefault("AI_BASE_URL", "https://api.openai.com/v1"),
+		AIAPIKey:       envOrDefault("AI_API_KEY", ""),
+		AIModel:        envOrDefault("AI_MODEL", "gpt-4o-mini"),
 	}
 }
 
