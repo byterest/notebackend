@@ -42,6 +42,7 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 			protected.GET("/canvases", canvasHandler.List)
 			protected.POST("/canvases", canvasHandler.Create)
 			protected.GET("/canvases/:id", canvasHandler.Get)
+			protected.GET("/canvases/:id/stream", canvasHandler.Stream)
 			protected.PUT("/canvases/:id", canvasHandler.Update)
 			protected.DELETE("/canvases/:id", canvasHandler.Delete)
 			protected.POST("/uploads/images", uploadHandler.Image)

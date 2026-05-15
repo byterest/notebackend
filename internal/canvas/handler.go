@@ -4,10 +4,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"note-backend/internal/auth"
 
@@ -18,6 +20,9 @@ import (
 type Handler struct {
 	store *Store
 }
+
+const contentChunkSize = 30
+const maxDebugDelay = 2000
 
 // NewHandler creates a canvas handler.
 func NewHandler(store *Store) *Handler {
@@ -92,6 +97,91 @@ func (h *Handler) Get(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": item})
+}
+
+// Stream returns a canvas in staged SSE events so the client can render skeletons first.
+func (h *Handler) Stream(c *gin.Context) {
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid canvas id"})
+		return
+	}
+
+	item, err := h.store.Get(c.Request.Context(), user.ID, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "canvas not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	parsed, err := parseCanvasEnvelope(item.Data)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "invalid canvas data"})
+		return
+	}
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "streaming unsupported"})
+		return
+	}
+
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+
+	debugDelay := parseDebugDelay(c.Query("debug_delay_ms"))
+
+	if err := writeSSE(c.Writer, "meta", gin.H{
+		"id":       item.ID,
+		"name":     item.Name,
+		"viewport": parsed.Viewport,
+	}); err != nil {
+		return
+	}
+	flusher.Flush()
+	sleepIfNeeded(c, debugDelay)
+
+	if err := writeSSE(c.Writer, "nodes:skeleton", gin.H{
+		"items": buildSkeletonNodes(parsed.Nodes),
+	}); err != nil {
+		return
+	}
+	flusher.Flush()
+	sleepIfNeeded(c, debugDelay)
+
+	for _, chunk := range buildContentChunks(parsed.Nodes, contentChunkSize) {
+		select {
+		case <-c.Request.Context().Done():
+			return
+		default:
+		}
+
+		if err := writeSSE(c.Writer, "nodes:content", gin.H{"items": chunk}); err != nil {
+			return
+		}
+		flusher.Flush()
+		sleepIfNeeded(c, debugDelay)
+	}
+
+	if err := writeSSE(c.Writer, "edges", gin.H{"items": parsed.Edges}); err != nil {
+		return
+	}
+	flusher.Flush()
+	sleepIfNeeded(c, debugDelay)
+
+	_ = writeSSE(c.Writer, "done", gin.H{})
+	flusher.Flush()
 }
 
 // Update changes canvas name or data.
@@ -215,4 +305,136 @@ func normalizeData(raw string) string {
 		return defaultCanvasData
 	}
 	return string(normalized)
+}
+
+type parsedCanvasEnvelope struct {
+	Nodes    []map[string]any
+	Edges    []map[string]any
+	Viewport map[string]any
+}
+
+func parseCanvasEnvelope(raw string) (parsedCanvasEnvelope, error) {
+	var payload struct {
+		Nodes    []map[string]any `json:"nodes"`
+		Edges    []map[string]any `json:"edges"`
+		Viewport map[string]any   `json:"viewport"`
+	}
+
+	if err := json.Unmarshal([]byte(normalizeData(raw)), &payload); err != nil {
+		return parsedCanvasEnvelope{}, err
+	}
+
+	viewport := payload.Viewport
+	if viewport == nil {
+		viewport = map[string]any{"x": 0, "y": 0, "zoom": 1}
+	}
+
+	return parsedCanvasEnvelope{
+		Nodes:    payload.Nodes,
+		Edges:    payload.Edges,
+		Viewport: viewport,
+	}, nil
+}
+
+func buildSkeletonNodes(nodes []map[string]any) []map[string]any {
+	items := make([]map[string]any, 0, len(nodes))
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+
+		item := map[string]any{}
+		copyMapField(item, node, "id")
+		copyMapField(item, node, "type")
+		copyMapField(item, node, "position")
+		copyMapField(item, node, "parentId")
+		copyMapField(item, node, "extent")
+		copyMapField(item, node, "style")
+		copyMapField(item, node, "measured")
+		copyMapField(item, node, "className")
+		copyMapField(item, node, "zIndex")
+		items = append(items, item)
+	}
+	return items
+}
+
+func buildContentChunks(nodes []map[string]any, chunkSize int) [][]map[string]any {
+	if chunkSize <= 0 {
+		chunkSize = contentChunkSize
+	}
+
+	chunks := make([][]map[string]any, 0, (len(nodes)+chunkSize-1)/chunkSize)
+	current := make([]map[string]any, 0, chunkSize)
+
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+
+		item := map[string]any{}
+		copyMapField(item, node, "id")
+		copyMapField(item, node, "data")
+		copyMapField(item, node, "measured")
+
+		current = append(current, item)
+		if len(current) == chunkSize {
+			chunks = append(chunks, current)
+			current = make([]map[string]any, 0, chunkSize)
+		}
+	}
+
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+
+	return chunks
+}
+
+func copyMapField(dst, src map[string]any, key string) {
+	value, ok := src[key]
+	if !ok {
+		return
+	}
+	dst[key] = value
+}
+
+func writeSSE(writer io.Writer, event string, payload any) error {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	if _, err := fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", event, encoded); err != nil {
+		return err
+	}
+	return nil
+}
+
+func parseDebugDelay(raw string) time.Duration {
+	if strings.TrimSpace(raw) == "" {
+		return 0
+	}
+
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return 0
+	}
+	if value > maxDebugDelay {
+		value = maxDebugDelay
+	}
+	return time.Duration(value) * time.Millisecond
+}
+
+func sleepIfNeeded(c *gin.Context, delay time.Duration) {
+	if delay <= 0 {
+		return
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-c.Request.Context().Done():
+	case <-timer.C:
+	}
 }
