@@ -3,6 +3,13 @@ package canvas
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"time"
+)
+
+var (
+	ErrCanvasLocked = errors.New("canvas is locked")
+	ErrInvalidLock  = errors.New("invalid canvas lock")
 )
 
 // Store handles canvas persistence.
@@ -78,6 +85,104 @@ func (s *Store) Update(ctx context.Context, userID, id int64, name, data string)
 		return Canvas{}, err
 	}
 	return s.Get(ctx, userID, id)
+}
+
+// AcquireLock creates or renews the editing lease for a canvas.
+func (s *Store) AcquireLock(ctx context.Context, userID, canvasID int64, clientID, lockToken string, ttl time.Duration) (CanvasLock, bool, error) {
+	now := time.Now().UTC()
+	expiresAt := now.Add(ttl)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return CanvasLock{}, false, err
+	}
+	defer tx.Rollback()
+
+	var current CanvasLock
+	row := tx.QueryRowContext(ctx, `
+		SELECT canvas_id, user_id, client_id, lock_token, expires_at, updated_at
+		FROM canvas_locks
+		WHERE canvas_id = ? AND user_id = ?
+	`, canvasID, userID)
+	err = row.Scan(&current.CanvasID, &current.UserID, &current.ClientID, &current.LockToken, &current.ExpiresAt, &current.UpdatedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return CanvasLock{}, false, err
+	}
+
+	if err == nil && current.ClientID != clientID && current.ExpiresAt.After(now) {
+		return current, false, tx.Commit()
+	}
+
+	if err == nil && current.ClientID == clientID && current.LockToken != "" {
+		lockToken = current.LockToken
+	}
+
+	lock := CanvasLock{
+		CanvasID:  canvasID,
+		UserID:    userID,
+		ClientID:  clientID,
+		LockToken: lockToken,
+		ExpiresAt: expiresAt,
+		UpdatedAt: now,
+	}
+
+	if errors.Is(err, sql.ErrNoRows) {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO canvas_locks (canvas_id, user_id, client_id, lock_token, expires_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, lock.CanvasID, lock.UserID, lock.ClientID, lock.LockToken, lock.ExpiresAt, lock.UpdatedAt)
+	} else {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE canvas_locks
+			SET client_id = ?, lock_token = ?, expires_at = ?, updated_at = ?
+			WHERE canvas_id = ? AND user_id = ?
+		`, lock.ClientID, lock.LockToken, lock.ExpiresAt, lock.UpdatedAt, canvasID, userID)
+	}
+	if err != nil {
+		return CanvasLock{}, false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return CanvasLock{}, false, err
+	}
+	return lock, true, nil
+}
+
+// ValidateLock confirms that the client still owns the editing lease.
+func (s *Store) ValidateLock(ctx context.Context, userID, canvasID int64, clientID, lockToken string) error {
+	if clientID == "" || lockToken == "" {
+		return ErrInvalidLock
+	}
+
+	var expiresAt time.Time
+	err := s.db.QueryRowContext(ctx, `
+		SELECT expires_at
+		FROM canvas_locks
+		WHERE canvas_id = ? AND user_id = ? AND client_id = ? AND lock_token = ?
+	`, canvasID, userID, clientID, lockToken).Scan(&expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrInvalidLock
+	}
+	if err != nil {
+		return err
+	}
+	if !expiresAt.After(time.Now().UTC()) {
+		return ErrInvalidLock
+	}
+	return nil
+}
+
+// ReleaseLock removes the editing lease if it is still held by the client.
+func (s *Store) ReleaseLock(ctx context.Context, userID, canvasID int64, clientID, lockToken string) error {
+	if clientID == "" || lockToken == "" {
+		return nil
+	}
+
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM canvas_locks
+		WHERE canvas_id = ? AND user_id = ? AND client_id = ? AND lock_token = ?
+	`, canvasID, userID, clientID, lockToken)
+	return err
 }
 
 // Delete removes a user-owned canvas.

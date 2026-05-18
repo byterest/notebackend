@@ -92,10 +92,21 @@ CREATE TABLE IF NOT EXISTS canvases (
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS canvas_locks (
+	canvas_id INTEGER NOT NULL REFERENCES canvases(id) ON DELETE CASCADE,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	client_id TEXT NOT NULL,
+	lock_token TEXT NOT NULL,
+	expires_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (canvas_id, user_id)
+);
 `
 
 const indexes = `
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_canvases_user_updated ON canvases(user_id, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_canvas_locks_expires_at ON canvas_locks(expires_at);
 `

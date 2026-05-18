@@ -1,7 +1,9 @@
 package canvas
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,7 @@ type Handler struct {
 
 const contentChunkSize = 30
 const maxDebugDelay = 2000
+const canvasLockTTL = 30 * time.Second
 
 // NewHandler creates a canvas handler.
 func NewHandler(store *Store) *Handler {
@@ -184,6 +187,66 @@ func (h *Handler) Stream(c *gin.Context) {
 	flusher.Flush()
 }
 
+// AcquireLock claims or renews the editing lease for a canvas.
+func (h *Handler) AcquireLock(c *gin.Context) {
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid canvas id"})
+		return
+	}
+
+	if _, err := h.store.Get(c.Request.Context(), user.ID, id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "canvas not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	var request struct {
+		ClientID string `json:"client_id"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	clientID := normalizeClientID(request.ClientID)
+	if clientID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "client_id is required"})
+		return
+	}
+
+	token, err := newLockToken()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create lock token"})
+		return
+	}
+
+	lock, acquired, err := h.store.AcquireLock(c.Request.Context(), user.ID, id, clientID, token, canvasLockTTL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !acquired {
+		lock.LockToken = ""
+		c.JSON(http.StatusLocked, gin.H{
+			"error": "canvas is open in another tab",
+			"data":  lock,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": lock})
+}
+
 // Update changes canvas name or data.
 func (h *Handler) Update(c *gin.Context) {
 	user, ok := auth.CurrentUser(c)
@@ -198,6 +261,17 @@ func (h *Handler) Update(c *gin.Context) {
 		return
 	}
 
+	var request struct {
+		Name      *string `json:"name"`
+		Data      *string `json:"data"`
+		ClientID  string  `json:"client_id"`
+		LockToken string  `json:"lock_token"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
 	current, err := h.store.Get(c.Request.Context(), user.ID, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -208,12 +282,12 @@ func (h *Handler) Update(c *gin.Context) {
 		return
 	}
 
-	var request struct {
-		Name *string `json:"name"`
-		Data *string `json:"data"`
-	}
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+	if err := h.store.ValidateLock(c.Request.Context(), user.ID, id, normalizeClientID(request.ClientID), strings.TrimSpace(request.LockToken)); err != nil {
+		if errors.Is(err, ErrInvalidLock) {
+			c.JSON(http.StatusLocked, gin.H{"error": "canvas editing lock is no longer active"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
@@ -238,6 +312,36 @@ func (h *Handler) Update(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"data": updated})
+}
+
+// ReleaseLock releases the editing lease held by the current client.
+func (h *Handler) ReleaseLock(c *gin.Context) {
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid canvas id"})
+		return
+	}
+
+	var request struct {
+		ClientID  string `json:"client_id"`
+		LockToken string `json:"lock_token"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	if err := h.store.ReleaseLock(c.Request.Context(), user.ID, id, normalizeClientID(request.ClientID), strings.TrimSpace(request.LockToken)); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 // Delete removes a canvas.
@@ -277,6 +381,22 @@ func normalizeName(raw string) string {
 		return defaultCanvasName
 	}
 	return name
+}
+
+func normalizeClientID(raw string) string {
+	value := strings.TrimSpace(raw)
+	if len(value) > 128 {
+		return value[:128]
+	}
+	return value
+}
+
+func newLockToken() (string, error) {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes[:]), nil
 }
 
 func normalizeData(raw string) string {
