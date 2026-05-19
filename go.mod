@@ -5,6 +5,7 @@ go 1.23.0
 require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/joho/godotenv v1.5.1
+	github.com/lib/pq v1.12.3
 	golang.org/x/crypto v0.40.0
 	modernc.org/sqlite v1.39.0
 )

@@ -19,7 +19,7 @@ func main() {
 		log.Fatalf("create upload dir: %v", err)
 	}
 
-	db, err := database.Open(cfg.DatabasePath)
+	db, err := database.Open(cfg.DatabaseURL)
 	if err != nil {
 		log.Fatalf("open database: %v", err)
 	}

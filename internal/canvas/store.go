@@ -27,7 +27,7 @@ func (s *Store) List(ctx context.Context, userID int64) ([]Canvas, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, user_id, name, data, created_at, updated_at
 		FROM canvases
-		WHERE user_id = ?
+		WHERE user_id = $1
 		ORDER BY updated_at DESC, id DESC
 	`, userID)
 	if err != nil {
@@ -48,17 +48,17 @@ func (s *Store) List(ctx context.Context, userID int64) ([]Canvas, error) {
 
 // Create inserts a new canvas for a user.
 func (s *Store) Create(ctx context.Context, userID int64, name, data string) (Canvas, error) {
-	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO canvases (user_id, name, data) VALUES (?, ?, ?)`,
+	var id int64
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO canvases (user_id, name, data) VALUES ($1, $2, $3) RETURNING id`,
 		userID,
 		name,
 		data,
-	)
+	).Scan(&id)
 	if err != nil {
 		return Canvas{}, err
 	}
 
-	id, _ := result.LastInsertId()
 	return s.Get(ctx, userID, id)
 }
 
@@ -67,7 +67,7 @@ func (s *Store) Get(ctx context.Context, userID, id int64) (Canvas, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, user_id, name, data, created_at, updated_at
 		FROM canvases
-		WHERE id = ? AND user_id = ?
+		WHERE id = $1 AND user_id = $2
 	`, id, userID)
 	return scanCanvas(row.Scan)
 }
@@ -75,7 +75,7 @@ func (s *Store) Get(ctx context.Context, userID, id int64) (Canvas, error) {
 // Update replaces mutable canvas fields.
 func (s *Store) Update(ctx context.Context, userID, id int64, name, data string) (Canvas, error) {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE canvases SET name = ?, data = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?`,
+		`UPDATE canvases SET name = $1, data = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3 AND user_id = $4`,
 		name,
 		data,
 		id,
@@ -102,7 +102,7 @@ func (s *Store) AcquireLock(ctx context.Context, userID, canvasID int64, clientI
 	row := tx.QueryRowContext(ctx, `
 		SELECT canvas_id, user_id, client_id, lock_token, expires_at, updated_at
 		FROM canvas_locks
-		WHERE canvas_id = ? AND user_id = ?
+		WHERE canvas_id = $1 AND user_id = $2
 	`, canvasID, userID)
 	err = row.Scan(&current.CanvasID, &current.UserID, &current.ClientID, &current.LockToken, &current.ExpiresAt, &current.UpdatedAt)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -129,13 +129,13 @@ func (s *Store) AcquireLock(ctx context.Context, userID, canvasID int64, clientI
 	if errors.Is(err, sql.ErrNoRows) {
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO canvas_locks (canvas_id, user_id, client_id, lock_token, expires_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?)
+			VALUES ($1, $2, $3, $4, $5, $6)
 		`, lock.CanvasID, lock.UserID, lock.ClientID, lock.LockToken, lock.ExpiresAt, lock.UpdatedAt)
 	} else {
 		_, err = tx.ExecContext(ctx, `
 			UPDATE canvas_locks
-			SET client_id = ?, lock_token = ?, expires_at = ?, updated_at = ?
-			WHERE canvas_id = ? AND user_id = ?
+			SET client_id = $1, lock_token = $2, expires_at = $3, updated_at = $4
+			WHERE canvas_id = $5 AND user_id = $6
 		`, lock.ClientID, lock.LockToken, lock.ExpiresAt, lock.UpdatedAt, canvasID, userID)
 	}
 	if err != nil {
@@ -158,7 +158,7 @@ func (s *Store) ValidateLock(ctx context.Context, userID, canvasID int64, client
 	err := s.db.QueryRowContext(ctx, `
 		SELECT expires_at
 		FROM canvas_locks
-		WHERE canvas_id = ? AND user_id = ? AND client_id = ? AND lock_token = ?
+		WHERE canvas_id = $1 AND user_id = $2 AND client_id = $3 AND lock_token = $4
 	`, canvasID, userID, clientID, lockToken).Scan(&expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrInvalidLock
@@ -180,14 +180,14 @@ func (s *Store) ReleaseLock(ctx context.Context, userID, canvasID int64, clientI
 
 	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM canvas_locks
-		WHERE canvas_id = ? AND user_id = ? AND client_id = ? AND lock_token = ?
+		WHERE canvas_id = $1 AND user_id = $2 AND client_id = $3 AND lock_token = $4
 	`, canvasID, userID, clientID, lockToken)
 	return err
 }
 
 // Delete removes a user-owned canvas.
 func (s *Store) Delete(ctx context.Context, userID, id int64) (bool, error) {
-	result, err := s.db.ExecContext(ctx, `DELETE FROM canvases WHERE id = ? AND user_id = ?`, id, userID)
+	result, err := s.db.ExecContext(ctx, `DELETE FROM canvases WHERE id = $1 AND user_id = $2`, id, userID)
 	if err != nil {
 		return false, err
 	}

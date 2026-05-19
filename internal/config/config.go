@@ -12,7 +12,7 @@ const defaultMaxUploadSize = 20 << 20
 type Config struct {
 	Port           string
 	FrontendOrigin string
-	DatabasePath   string
+	DatabaseURL    string
 	UploadDir      string
 	SessionTTL     time.Duration
 	MaxUploadSize  int64
@@ -23,7 +23,7 @@ func Load() Config {
 	return Config{
 		Port:           envOrDefault("PORT", "8081"),
 		FrontendOrigin: envOrDefault("FRONTEND_ORIGIN", "http://localhost:5174"),
-		DatabasePath:   envOrDefault("DATABASE_PATH", "./note.db"),
+		DatabaseURL:    envOrDefault("DATABASE_URL", "postgresql://postgres:123456@localhost:5438/note?sslmode=disable"),
 		UploadDir:      envOrDefault("UPLOAD_DIR", "./uploads"),
 		SessionTTL:     30 * 24 * time.Hour,
 		MaxUploadSize:  defaultMaxUploadSize,

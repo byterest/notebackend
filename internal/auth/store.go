@@ -57,12 +57,13 @@ func (s *Store) CreateUser(ctx context.Context, email, displayName, password str
 		return User{}, fmt.Errorf("hash password: %w", err)
 	}
 
-	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO users (email, display_name, password_hash) VALUES (?, ?, ?)`,
+	var id int64
+	err = s.db.QueryRowContext(ctx,
+		`INSERT INTO users (email, display_name, password_hash) VALUES ($1, $2, $3) RETURNING id`,
 		normalizedEmail,
 		displayName,
 		string(passwordHash),
-	)
+	).Scan(&id)
 	if err != nil {
 		if isUniqueConstraintError(err) {
 			return User{}, ErrEmailExists
@@ -70,7 +71,6 @@ func (s *Store) CreateUser(ctx context.Context, email, displayName, password str
 		return User{}, err
 	}
 
-	id, _ := result.LastInsertId()
 	return s.GetUserByID(ctx, id)
 }
 
@@ -105,7 +105,7 @@ func (s *Store) CreateSession(ctx context.Context, userID int64) (string, error)
 
 	expiresAt := time.Now().UTC().Add(s.sessionTTL)
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (token, user_id, expires_at) VALUES (?, ?, ?)`,
+		`INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)`,
 		token,
 		userID,
 		expiresAt,
@@ -128,7 +128,7 @@ func (s *Store) GetUserBySession(ctx context.Context, token string) (User, error
 		SELECT users.id, users.email, users.display_name, users.created_at, users.updated_at
 		FROM sessions
 		JOIN users ON users.id = sessions.user_id
-		WHERE sessions.token = ? AND sessions.expires_at > CURRENT_TIMESTAMP
+		WHERE sessions.token = $1 AND sessions.expires_at > CURRENT_TIMESTAMP
 	`, token).Scan(&user.ID, &user.Email, &user.DisplayName, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -142,7 +142,7 @@ func (s *Store) GetUserBySession(ctx context.Context, token string) (User, error
 
 // DeleteSession revokes a token.
 func (s *Store) DeleteSession(ctx context.Context, token string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, strings.TrimSpace(token))
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token = $1`, strings.TrimSpace(token))
 	return err
 }
 
@@ -156,7 +156,7 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context) error {
 func (s *Store) GetUserByID(ctx context.Context, id int64) (User, error) {
 	var user User
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, email, display_name, created_at, updated_at FROM users WHERE id = ?`,
+		`SELECT id, email, display_name, created_at, updated_at FROM users WHERE id = $1`,
 		id,
 	).Scan(&user.ID, &user.Email, &user.DisplayName, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
@@ -168,7 +168,7 @@ func (s *Store) GetUserByID(ctx context.Context, id int64) (User, error) {
 func (s *Store) getUserByEmail(ctx context.Context, email string) (userWithPassword, error) {
 	var account userWithPassword
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, email, display_name, password_hash, created_at, updated_at FROM users WHERE email = ?`,
+		`SELECT id, email, display_name, password_hash, created_at, updated_at FROM users WHERE email = $1`,
 		email,
 	).Scan(
 		&account.ID,
