@@ -152,6 +152,53 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context) error {
 	return err
 }
 
+// UpdateUser updates the user's display name.
+func (s *Store) UpdateUser(ctx context.Context, id int64, displayName string) (User, error) {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return User{}, ErrInvalidDisplayName
+	}
+	if len([]rune(displayName)) > 80 {
+		return User{}, ErrInvalidDisplayName
+	}
+
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET display_name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+		displayName, id,
+	)
+	if err != nil {
+		return User{}, err
+	}
+	return s.GetUserByID(ctx, id)
+}
+
+// UpdatePassword changes the user's password after verifying the old one.
+func (s *Store) UpdatePassword(ctx context.Context, id int64, oldPassword, newPassword string) error {
+	if len(newPassword) < 8 {
+		return ErrInvalidPassword
+	}
+
+	account, err := s.getUserByIDWithPassword(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(account.PasswordHash), []byte(oldPassword)); err != nil {
+		return ErrInvalidCredential
+	}
+
+	newHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+
+	_, err = s.db.ExecContext(ctx,
+		`UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+		string(newHash), id,
+	)
+	return err
+}
+
 // GetUserByID returns a user by ID.
 func (s *Store) GetUserByID(ctx context.Context, id int64) (User, error) {
 	var user User
@@ -163,6 +210,25 @@ func (s *Store) GetUserByID(ctx context.Context, id int64) (User, error) {
 		return User{}, err
 	}
 	return user, nil
+}
+
+func (s *Store) getUserByIDWithPassword(ctx context.Context, id int64) (userWithPassword, error) {
+	var account userWithPassword
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, email, display_name, password_hash, created_at, updated_at FROM users WHERE id = $1`,
+		id,
+	).Scan(
+		&account.ID,
+		&account.Email,
+		&account.DisplayName,
+		&account.PasswordHash,
+		&account.CreatedAt,
+		&account.UpdatedAt,
+	)
+	if err != nil {
+		return userWithPassword{}, err
+	}
+	return account, nil
 }
 
 func (s *Store) getUserByEmail(ctx context.Context, email string) (userWithPassword, error) {

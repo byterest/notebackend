@@ -37,6 +37,8 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 		protected.Use(auth.Middleware(authStore))
 		{
 			protected.GET("/auth/me", authHandler.Me)
+			protected.PUT("/auth/profile", authHandler.UpdateProfile)
+			protected.PUT("/auth/password", authHandler.UpdatePassword)
 			protected.POST("/auth/logout", authHandler.Logout)
 
 			protected.GET("/canvases", canvasHandler.List)

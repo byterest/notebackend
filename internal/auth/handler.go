@@ -90,6 +90,60 @@ func (h *Handler) Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+type updateProfileRequest struct {
+	DisplayName string `json:"display_name"`
+}
+
+// UpdateProfile updates the authenticated user's display name.
+func (h *Handler) UpdateProfile(c *gin.Context) {
+	user, ok := CurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	var request updateProfileRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	updated, err := h.store.UpdateUser(c.Request.Context(), user.ID, request.DisplayName)
+	if err != nil {
+		writeAuthError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": updated})
+}
+
+type updatePasswordRequest struct {
+	OldPassword string `json:"old_password"`
+	NewPassword string `json:"new_password"`
+}
+
+// UpdatePassword changes the authenticated user's password.
+func (h *Handler) UpdatePassword(c *gin.Context) {
+	user, ok := CurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	var request updatePasswordRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	if err := h.store.UpdatePassword(c.Request.Context(), user.ID, request.OldPassword, request.NewPassword); err != nil {
+		writeAuthError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 func writeAuthError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, ErrEmailExists):
