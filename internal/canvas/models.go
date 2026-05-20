@@ -9,12 +9,13 @@ const (
 
 // Canvas is a persisted note canvas.
 type Canvas struct {
-	ID        int64     `json:"id"`
-	UserID    int64     `json:"user_id"`
-	Name      string    `json:"name"`
-	Data      string    `json:"data"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        int64          `json:"id"`
+	UserID    int64          `json:"user_id"`
+	Name      string         `json:"name"`
+	Data      string         `json:"data,omitempty"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	Preview   map[string]any `json:"preview,omitempty"`
 }
 
 // CanvasLock is an editing lease for one user's canvas.

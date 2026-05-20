@@ -46,6 +46,11 @@ func (h *Handler) List(c *gin.Context) {
 		return
 	}
 
+	for i := range items {
+		items[i].Preview = buildPreview(items[i].Data)
+		items[i].Data = ""
+	}
+
 	c.JSON(http.StatusOK, gin.H{"data": items})
 }
 
@@ -454,6 +459,107 @@ func parseCanvasEnvelope(raw string) (parsedCanvasEnvelope, error) {
 		Edges:    payload.Edges,
 		Viewport: viewport,
 	}, nil
+}
+
+func buildPreview(data string) map[string]any {
+	parsed, err := parseCanvasEnvelope(data)
+	if err != nil {
+		return map[string]any{
+			"viewport": map[string]any{"x": 0, "y": 0, "zoom": 1},
+			"nodes":    []any{},
+			"edges":    []any{},
+		}
+	}
+
+	nodes := make([]map[string]any, 0, len(parsed.Nodes))
+	for _, node := range parsed.Nodes {
+		if node == nil {
+			continue
+		}
+		id, _ := node["id"].(string)
+		nodeType, _ := node["type"].(string)
+		parentId, _ := node["parentId"].(string)
+
+		var x, y float64
+		if pos, ok := node["position"].(map[string]any); ok {
+			x, _ = toFloat64(pos["x"])
+			y, _ = toFloat64(pos["y"])
+		}
+
+		w, h := 200.0, 120.0
+		if style, ok := node["style"].(map[string]any); ok {
+			if sw, ok := toFloat64(style["width"]); ok && sw > 0 {
+				w = sw
+			}
+			if sh, ok := toFloat64(style["height"]); ok && sh > 0 {
+				h = sh
+			}
+		}
+
+		if measured, ok := node["measured"].(map[string]any); ok {
+			if mw, ok := toFloat64(measured["width"]); ok && mw > 0 {
+				w = mw
+			}
+			if mh, ok := toFloat64(measured["height"]); ok && mh > 0 {
+				h = mh
+			}
+		}
+
+		previewNode := map[string]any{
+			"id":   id,
+			"type": nodeType,
+			"x":    x,
+			"y":    y,
+			"w":    w,
+			"h":    h,
+		}
+		if parentId != "" {
+			previewNode["parentId"] = parentId
+		}
+		nodes = append(nodes, previewNode)
+	}
+
+	edges := make([]map[string]any, 0, len(parsed.Edges))
+	for _, edge := range parsed.Edges {
+		if edge == nil {
+			continue
+		}
+		source, _ := edge["source"].(string)
+		target, _ := edge["target"].(string)
+		if source == "" || target == "" {
+			continue
+		}
+		edges = append(edges, map[string]any{
+			"source": source,
+			"target": target,
+		})
+	}
+
+	return map[string]any{
+		"viewport": parsed.Viewport,
+		"nodes":    nodes,
+		"edges":    edges,
+	}
+}
+
+func toFloat64(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float64:
+		return n, true
+	case float32:
+		return float64(n), true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case string:
+		if parsed, err := strconv.ParseFloat(strings.TrimSpace(n), 64); err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
 }
 
 func buildSkeletonNodes(nodes []map[string]any) []map[string]any {
