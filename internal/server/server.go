@@ -2,11 +2,13 @@ package server
 
 import (
 	"database/sql"
+	"log"
 	"net/http"
 
 	"note-backend/internal/auth"
 	"note-backend/internal/canvas"
 	"note-backend/internal/config"
+	"note-backend/internal/s3"
 	"note-backend/internal/upload"
 
 	"github.com/gin-gonic/gin"
@@ -17,7 +19,17 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 	authStore := auth.NewStore(db, cfg.SessionTTL)
 	authHandler := auth.NewHandler(authStore)
 	canvasHandler := canvas.NewHandler(canvas.NewStore(db))
-	uploadHandler := upload.NewHandler(cfg.UploadDir, cfg.MaxUploadSize)
+
+	var uploadHandler *upload.Handler
+	if cfg.S3 != nil {
+		s3Client, err := s3.NewClient(cfg.S3)
+		if err != nil {
+			log.Fatalf("create s3 client: %v", err)
+		}
+		uploadHandler = upload.NewHandlerWithS3(cfg.UploadDir, cfg.MaxUploadSize, s3Client, cfg.S3.Endpoint)
+	} else {
+		uploadHandler = upload.NewHandler(cfg.UploadDir, cfg.MaxUploadSize)
+	}
 
 	router := gin.Default()
 	router.MaxMultipartMemory = cfg.MaxUploadSize

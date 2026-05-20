@@ -1,6 +1,8 @@
 package upload
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -11,17 +13,37 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	notes3 "note-backend/internal/s3"
 )
+
+// S3Uploader defines the minimal interface for S3-like uploads.
+type S3Uploader interface {
+	Upload(ctx context.Context, key string, reader io.Reader, contentType string) (string, error)
+	PublicURL(endpoint string, key string) string
+}
 
 // Handler exposes file upload endpoints.
 type Handler struct {
 	uploadDir     string
 	maxUploadSize int64
+	s3Client      S3Uploader
+	s3Endpoint    string
 }
 
 // NewHandler creates an upload handler.
 func NewHandler(uploadDir string, maxUploadSize int64) *Handler {
 	return &Handler{uploadDir: uploadDir, maxUploadSize: maxUploadSize}
+}
+
+// NewHandlerWithS3 creates an upload handler with S3 support.
+func NewHandlerWithS3(uploadDir string, maxUploadSize int64, s3Client S3Uploader, s3Endpoint string) *Handler {
+	return &Handler{
+		uploadDir:  uploadDir,
+		maxUploadSize: maxUploadSize,
+		s3Client:   s3Client,
+		s3Endpoint: s3Endpoint,
+	}
 }
 
 // Image stores an uploaded image and returns its URL.
@@ -42,25 +64,55 @@ func (h *Handler) Image(c *gin.Context) {
 		return
 	}
 
-	filename := fmt.Sprintf("%d%s", time.Now().UnixNano(), filepath.Ext(fileHeader.Filename))
-	path := filepath.Join(h.uploadDir, filename)
-	if err := c.SaveUploadedFile(fileHeader, path); err != nil {
+	file, err := fileHeader.Open()
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	defer file.Close()
 
-	baseURL := fmt.Sprintf("%s://%s", scheme(c.Request), c.Request.Host)
-	if forwarded := c.GetHeader("X-Forwarded-Host"); forwarded != "" {
-		proto := c.GetHeader("X-Forwarded-Proto")
-		if proto == "" {
-			proto = scheme(c.Request)
+	var filename, url string
+
+	if h.s3Client != nil {
+		// S3 upload
+		key := notes3.GenerateKey("uploads", fileHeader.Filename)
+		data, err := io.ReadAll(file)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
 		}
-		baseURL = fmt.Sprintf("%s://%s", proto, forwarded)
+		contentType := http.DetectContentType(data)
+		_, err = h.s3Client.Upload(c.Request.Context(), key, bytes.NewReader(data), contentType)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		filename = filepath.Base(key)
+		url = h.s3Client.PublicURL(h.s3Endpoint, key)
+	} else {
+		// Local storage fallback
+		filename = fmt.Sprintf("%d%s", time.Now().UnixNano(), filepath.Ext(fileHeader.Filename))
+		path := filepath.Join(h.uploadDir, filename)
+		if err := c.SaveUploadedFile(fileHeader, path); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		host := c.Request.Host
+		if forwardedHost := c.GetHeader("X-Forwarded-Host"); forwardedHost != "" {
+			host = forwardedHost
+		}
+		proto := scheme(c.Request)
+		if forwardedProto := c.GetHeader("X-Forwarded-Proto"); forwardedProto != "" {
+			proto = forwardedProto
+		}
+		baseURL := fmt.Sprintf("%s://%s", proto, host)
+		url = baseURL + "/uploads/" + filename
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
 		"data": gin.H{
-			"url":      baseURL + "/uploads/" + filename,
+			"url":      url,
 			"filename": filename,
 		},
 	})
