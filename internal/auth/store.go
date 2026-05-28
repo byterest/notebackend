@@ -125,11 +125,11 @@ func (s *Store) GetUserBySession(ctx context.Context, token string) (User, error
 
 	var user User
 	err := s.db.QueryRowContext(ctx, `
-		SELECT users.id, users.email, users.display_name, users.created_at, users.updated_at
+		SELECT users.id, users.email, users.display_name, users.avatar_url, users.created_at, users.updated_at
 		FROM sessions
 		JOIN users ON users.id = sessions.user_id
 		WHERE sessions.token = $1 AND sessions.expires_at > CURRENT_TIMESTAMP
-	`, token).Scan(&user.ID, &user.Email, &user.DisplayName, &user.CreatedAt, &user.UpdatedAt)
+	`, token).Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrInvalidSession
@@ -172,6 +172,18 @@ func (s *Store) UpdateUser(ctx context.Context, id int64, displayName string) (U
 	return s.GetUserByID(ctx, id)
 }
 
+// UpdateAvatarURL updates the user's avatar URL.
+func (s *Store) UpdateAvatarURL(ctx context.Context, id int64, avatarURL *string) (User, error) {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET avatar_url = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+		avatarURL, id,
+	)
+	if err != nil {
+		return User{}, err
+	}
+	return s.GetUserByID(ctx, id)
+}
+
 // UpdatePassword changes the user's password after verifying the old one.
 func (s *Store) UpdatePassword(ctx context.Context, id int64, oldPassword, newPassword string) error {
 	if len(newPassword) < 8 {
@@ -203,9 +215,9 @@ func (s *Store) UpdatePassword(ctx context.Context, id int64, oldPassword, newPa
 func (s *Store) GetUserByID(ctx context.Context, id int64) (User, error) {
 	var user User
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, email, display_name, created_at, updated_at FROM users WHERE id = $1`,
+		`SELECT id, email, display_name, avatar_url, created_at, updated_at FROM users WHERE id = $1`,
 		id,
-	).Scan(&user.ID, &user.Email, &user.DisplayName, &user.CreatedAt, &user.UpdatedAt)
+	).Scan(&user.ID, &user.Email, &user.DisplayName, &user.AvatarURL, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return User{}, err
 	}
@@ -215,13 +227,14 @@ func (s *Store) GetUserByID(ctx context.Context, id int64) (User, error) {
 func (s *Store) getUserByIDWithPassword(ctx context.Context, id int64) (userWithPassword, error) {
 	var account userWithPassword
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, email, display_name, password_hash, created_at, updated_at FROM users WHERE id = $1`,
+		`SELECT id, email, display_name, password_hash, avatar_url, created_at, updated_at FROM users WHERE id = $1`,
 		id,
 	).Scan(
 		&account.ID,
 		&account.Email,
 		&account.DisplayName,
 		&account.PasswordHash,
+		&account.AvatarURL,
 		&account.CreatedAt,
 		&account.UpdatedAt,
 	)
@@ -234,13 +247,14 @@ func (s *Store) getUserByIDWithPassword(ctx context.Context, id int64) (userWith
 func (s *Store) getUserByEmail(ctx context.Context, email string) (userWithPassword, error) {
 	var account userWithPassword
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, email, display_name, password_hash, created_at, updated_at FROM users WHERE email = $1`,
+		`SELECT id, email, display_name, password_hash, avatar_url, created_at, updated_at FROM users WHERE email = $1`,
 		email,
 	).Scan(
 		&account.ID,
 		&account.Email,
 		&account.DisplayName,
 		&account.PasswordHash,
+		&account.AvatarURL,
 		&account.CreatedAt,
 		&account.UpdatedAt,
 	)

@@ -59,7 +59,7 @@ func (h *Handler) Image(c *gin.Context) {
 		return
 	}
 
-	if err := validateImage(fileHeader); err != nil {
+	if err := ValidateImage(fileHeader); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -118,7 +118,8 @@ func (h *Handler) Image(c *gin.Context) {
 	})
 }
 
-func validateImage(fileHeader *multipart.FileHeader) error {
+// ValidateImage checks if the uploaded file is a valid image.
+func ValidateImage(fileHeader *multipart.FileHeader) error {
 	file, err := fileHeader.Open()
 	if err != nil {
 		return err

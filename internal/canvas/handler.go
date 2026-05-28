@@ -24,7 +24,6 @@ type Handler struct {
 }
 
 const contentChunkSize = 30
-const maxDebugDelay = 2000
 const canvasLockTTL = 30 * time.Second
 
 // NewHandler creates a canvas handler.
@@ -644,9 +643,6 @@ func parseDebugDelay(raw string) time.Duration {
 	value, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil || value <= 0 {
 		return 0
-	}
-	if value > maxDebugDelay {
-		value = maxDebugDelay
 	}
 	return time.Duration(value) * time.Millisecond
 }

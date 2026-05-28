@@ -17,7 +17,17 @@ import (
 // NewRouter wires middleware and routes.
 func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 	authStore := auth.NewStore(db, cfg.SessionTTL)
-	authHandler := auth.NewHandler(authStore)
+
+	var authHandler *auth.Handler
+	if cfg.S3 != nil {
+		s3Client, err := s3.NewClient(cfg.S3)
+		if err != nil {
+			log.Fatalf("create s3 client: %v", err)
+		}
+		authHandler = auth.NewHandlerWithS3(authStore, cfg.UploadDir, s3Client, cfg.S3.Endpoint)
+	} else {
+		authHandler = auth.NewHandler(authStore, cfg.UploadDir)
+	}
 	canvasHandler := canvas.NewHandler(canvas.NewStore(db))
 
 	var uploadHandler *upload.Handler
@@ -52,6 +62,8 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 			protected.PUT("/auth/profile", authHandler.UpdateProfile)
 			protected.PUT("/auth/password", authHandler.UpdatePassword)
 			protected.POST("/auth/logout", authHandler.Logout)
+			protected.POST("/auth/avatar", authHandler.UploadAvatar)
+			protected.DELETE("/auth/avatar", authHandler.DeleteAvatar)
 
 			protected.GET("/canvases", canvasHandler.List)
 			protected.POST("/canvases", canvasHandler.Create)

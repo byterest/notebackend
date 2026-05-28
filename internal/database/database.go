@@ -28,6 +28,10 @@ func Migrate(db *sql.DB) error {
 		return err
 	}
 
+	if _, err := db.Exec(migrations); err != nil {
+		return err
+	}
+
 	_, err := db.Exec(indexes)
 	return err
 }
@@ -67,6 +71,18 @@ CREATE TABLE IF NOT EXISTS canvas_locks (
 	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	PRIMARY KEY (canvas_id, user_id)
 );
+`
+
+const migrations = `
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'users' AND column_name = 'avatar_url'
+    ) THEN
+        ALTER TABLE users ADD COLUMN avatar_url TEXT;
+    END IF;
+END $$;
 `
 
 const indexes = `
