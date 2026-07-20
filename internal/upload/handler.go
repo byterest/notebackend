@@ -39,10 +39,10 @@ func NewHandler(uploadDir string, maxUploadSize int64) *Handler {
 // NewHandlerWithS3 creates an upload handler with S3 support.
 func NewHandlerWithS3(uploadDir string, maxUploadSize int64, s3Client S3Uploader, s3Endpoint string) *Handler {
 	return &Handler{
-		uploadDir:  uploadDir,
+		uploadDir:     uploadDir,
 		maxUploadSize: maxUploadSize,
-		s3Client:   s3Client,
-		s3Endpoint: s3Endpoint,
+		s3Client:      s3Client,
+		s3Endpoint:    s3Endpoint,
 	}
 }
 
@@ -64,50 +64,10 @@ func (h *Handler) Image(c *gin.Context) {
 		return
 	}
 
-	file, err := fileHeader.Open()
+	filename, url, err := h.storeUpload(c, fileHeader)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
-	}
-	defer file.Close()
-
-	var filename, url string
-
-	if h.s3Client != nil {
-		// S3 upload
-		key := notes3.GenerateKey("uploads", fileHeader.Filename)
-		data, err := io.ReadAll(file)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		contentType := http.DetectContentType(data)
-		_, err = h.s3Client.Upload(c.Request.Context(), key, bytes.NewReader(data), contentType)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		filename = filepath.Base(key)
-		url = h.s3Client.PublicURL(h.s3Endpoint, key)
-	} else {
-		// Local storage fallback
-		filename = fmt.Sprintf("%d%s", time.Now().UnixNano(), filepath.Ext(fileHeader.Filename))
-		path := filepath.Join(h.uploadDir, filename)
-		if err := c.SaveUploadedFile(fileHeader, path); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
-		host := c.Request.Host
-		if forwardedHost := c.GetHeader("X-Forwarded-Host"); forwardedHost != "" {
-			host = forwardedHost
-		}
-		proto := scheme(c.Request)
-		if forwardedProto := c.GetHeader("X-Forwarded-Proto"); forwardedProto != "" {
-			proto = forwardedProto
-		}
-		baseURL := fmt.Sprintf("%s://%s", proto, host)
-		url = baseURL + "/uploads/" + filename
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
@@ -116,6 +76,77 @@ func (h *Handler) Image(c *gin.Context) {
 			"filename": filename,
 		},
 	})
+}
+
+// PDF stores an uploaded PDF and returns its URL.
+func (h *Handler) PDF(c *gin.Context) {
+	fileHeader, err := c.FormFile("pdf")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pdf is required"})
+		return
+	}
+
+	if fileHeader.Size > h.maxUploadSize {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pdf exceeds 20MB limit"})
+		return
+	}
+
+	if err := ValidatePDF(fileHeader); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	filename, url, err := h.storeUpload(c, fileHeader)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"data": gin.H{
+			"url":      url,
+			"filename": filename,
+		},
+	})
+}
+
+func (h *Handler) storeUpload(c *gin.Context, fileHeader *multipart.FileHeader) (filename string, url string, err error) {
+	file, err := fileHeader.Open()
+	if err != nil {
+		return "", "", err
+	}
+	defer file.Close()
+
+	if h.s3Client != nil {
+		key := notes3.GenerateKey("uploads", fileHeader.Filename)
+		data, err := io.ReadAll(file)
+		if err != nil {
+			return "", "", err
+		}
+		contentType := http.DetectContentType(data)
+		_, err = h.s3Client.Upload(c.Request.Context(), key, bytes.NewReader(data), contentType)
+		if err != nil {
+			return "", "", err
+		}
+		return filepath.Base(key), h.s3Client.PublicURL(h.s3Endpoint, key), nil
+	}
+
+	filename = fmt.Sprintf("%d%s", time.Now().UnixNano(), filepath.Ext(fileHeader.Filename))
+	path := filepath.Join(h.uploadDir, filename)
+	if err := c.SaveUploadedFile(fileHeader, path); err != nil {
+		return "", "", err
+	}
+
+	host := c.Request.Host
+	if forwardedHost := c.GetHeader("X-Forwarded-Host"); forwardedHost != "" {
+		host = forwardedHost
+	}
+	proto := scheme(c.Request)
+	if forwardedProto := c.GetHeader("X-Forwarded-Proto"); forwardedProto != "" {
+		proto = forwardedProto
+	}
+	baseURL := fmt.Sprintf("%s://%s", proto, host)
+	return filename, baseURL + "/uploads/" + filename, nil
 }
 
 // ValidateImage checks if the uploaded file is a valid image.
@@ -135,6 +166,25 @@ func ValidateImage(fileHeader *multipart.FileHeader) error {
 	contentType := http.DetectContentType(buffer[:count])
 	if !strings.HasPrefix(contentType, "image/") {
 		return errors.New("only image uploads are supported")
+	}
+	return nil
+}
+
+// ValidatePDF checks if the uploaded file is a valid PDF.
+func ValidatePDF(fileHeader *multipart.FileHeader) error {
+	file, err := fileHeader.Open()
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	buffer := make([]byte, 5)
+	count, err := file.Read(buffer)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if count < 4 || string(buffer[:4]) != "%PDF" {
+		return errors.New("only PDF uploads are supported")
 	}
 	return nil
 }

@@ -74,6 +74,7 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 			protected.PUT("/canvases/:id", canvasHandler.Update)
 			protected.DELETE("/canvases/:id", canvasHandler.Delete)
 			protected.POST("/uploads/images", uploadHandler.Image)
+			protected.POST("/uploads/pdfs", uploadHandler.PDF)
 		}
 	}
 
