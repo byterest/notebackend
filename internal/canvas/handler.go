@@ -40,7 +40,7 @@ type Handler struct {
 const contentChunkSize = 30
 const canvasLockTTL = 30 * time.Second
 const maxZipImportSize = 200 << 20
-const maxZipFiles = 500
+const maxZipFiles = 2000
 const maxUncompressedAsset = 50 << 20
 
 // NewHandler creates a canvas handler.
@@ -448,7 +448,28 @@ func (h *Handler) ExportSnapshot(c *gin.Context) {
 	h.writeExportZip(c, normalizeName(request.Name), normalizeData(request.Data))
 }
 
-// Import creates a canvas from a .canvas.zip or legacy .canvas.json file.
+// ExportAll downloads every canvas owned by the user as a single zip.
+func (h *Handler) ExportAll(c *gin.Context) {
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	items, err := h.store.List(c.Request.Context(), user.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if len(items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no canvases to export"})
+		return
+	}
+
+	h.writeBundleZip(c, items)
+}
+
+// Import creates canvases from a .canvas.zip, all-canvases backup, or legacy .canvas.json.
 func (h *Handler) Import(c *gin.Context) {
 	user, ok := auth.CurrentUser(c)
 	if !ok {
@@ -475,19 +496,32 @@ func (h *Handler) Import(c *gin.Context) {
 	}
 	defer file.Close()
 
-	name, data, err := h.importCanvasFile(c, file, fileHeader.Filename, fileHeader.Size)
+	imported, err := h.importCanvasFile(c, file, fileHeader.Filename, fileHeader.Size)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	item, err := h.store.Create(c.Request.Context(), user.ID, normalizeName(name), normalizeData(data))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if len(imported.items) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "the selected file does not contain canvas data"})
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"data": item})
+	created := make([]Canvas, 0, len(imported.items))
+	for _, item := range imported.items {
+		canvas, err := h.store.Create(c.Request.Context(), user.ID, normalizeName(item.Name), normalizeData(item.Data))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		created = append(created, canvas)
+	}
+
+	if imported.bundle || len(created) > 1 {
+		c.JSON(http.StatusCreated, gin.H{"data": created, "bundle": true})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"data": created[0]})
 }
 
 func parseID(raw string) (int64, error) {

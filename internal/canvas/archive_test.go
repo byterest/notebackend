@@ -1,6 +1,7 @@
 package canvas
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -84,5 +85,25 @@ func TestZipEntryNameRejectsEscape(t *testing.T) {
 	}
 	if name := zipEntryName("assets/001.jpg"); name != "assets/001.jpg" {
 		t.Fatalf("normal path rejected: %q", name)
+	}
+}
+
+func TestBundleArchiveDetection(t *testing.T) {
+	if !isBundleArchive(map[string]*zip.File{}, []string{"canvases/001.json"}) {
+		t.Fatal("expected canvases/ files to be treated as a bundle")
+	}
+	if isBundleArchive(map[string]*zip.File{"canvas.json": {}}, nil) {
+		t.Fatal("single canvas zip should not be a bundle")
+	}
+}
+
+func TestUsedAssetMapping(t *testing.T) {
+	mapping := map[string]string{
+		"https://host/uploads/a.jpg": "assets/001.jpg",
+		"https://host/uploads/b.pdf": "assets/002.pdf",
+	}
+	used := usedAssetMapping(`{"imageUrl":"https://host/uploads/a.jpg"}`, mapping)
+	if len(used) != 1 || used["https://host/uploads/a.jpg"] != "assets/001.jpg" {
+		t.Fatalf("unexpected used mapping: %v", used)
 	}
 }

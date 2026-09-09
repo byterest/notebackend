@@ -76,6 +76,7 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 			protected.GET("/canvases", canvasHandler.List)
 			protected.POST("/canvases", canvasHandler.Create)
 			protected.POST("/canvases/export", canvasHandler.ExportSnapshot)
+			protected.GET("/canvases/export-all", canvasHandler.ExportAll)
 			protected.POST("/canvases/import", canvasHandler.Import)
 			protected.GET("/canvases/:id", canvasHandler.Get)
 			protected.GET("/canvases/:id/export", canvasHandler.Export)

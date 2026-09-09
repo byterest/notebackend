@@ -27,6 +27,7 @@ import (
 )
 
 const canvasExportType = "infinite-note-canvas"
+const canvasBundleType = "infinite-note-canvas-bundle"
 const canvasExportVersion = 2
 
 var embeddedURLPattern = regexp.MustCompile(`https?://[^\s"'<>\\)]+|/(?:uploads)/[^\s"'<>\\)]+`)
@@ -40,18 +41,126 @@ type canvasExportDocument struct {
 	Assets     map[string]string `json:"assets,omitempty"`
 }
 
+type canvasBundleManifest struct {
+	Type       string                     `json:"type"`
+	Version    int                        `json:"version"`
+	ExportedAt string                     `json:"exportedAt"`
+	Canvases   []canvasBundleManifestItem `json:"canvases"`
+}
+
+type canvasBundleManifestItem struct {
+	File string `json:"file"`
+	Name string `json:"name"`
+}
+
+type importedCanvas struct {
+	Name string
+	Data string
+}
+
+type importedArchive struct {
+	items  []importedCanvas
+	bundle bool
+}
+
+type fetchedAsset struct {
+	path string
+	data []byte
+}
+
 func (h *Handler) writeExportZip(c *gin.Context, name, data string) {
 	payload := normalizeData(data)
-	assetURLs := collectAssetURLs(payload, h.isOurAsset)
-
-	type fetchedAsset struct {
-		path string
-		data []byte
+	mapping, fetched := h.fetchAssets(c.Request.Context(), []string{payload})
+	document, err := encodeCanvasDocument(name, payload, mapping)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
-	fetched := make([]fetchedAsset, 0, len(assetURLs))
-	mapping := make(map[string]string, len(assetURLs))
-	for i, assetURL := range assetURLs {
-		body, err := h.readAssetBytes(c.Request.Context(), assetURL)
+
+	filename := sanitizeExportFileName(name) + ".canvas.zip"
+	h.streamZip(c, filename, func(writer *zip.Writer) error {
+		if err := writeZipBytes(writer, "canvas.json", document); err != nil {
+			return err
+		}
+		return writeFetchedAssets(writer, fetched)
+	})
+}
+
+func (h *Handler) writeBundleZip(c *gin.Context, items []Canvas) {
+	payloads := make([]string, 0, len(items))
+	for _, item := range items {
+		payloads = append(payloads, normalizeData(item.Data))
+	}
+	mapping, fetched := h.fetchAssets(c.Request.Context(), payloads)
+
+	exportedAt := time.Now().UTC().Format(time.RFC3339)
+	manifest := canvasBundleManifest{
+		Type:       canvasBundleType,
+		Version:    canvasExportVersion,
+		ExportedAt: exportedAt,
+		Canvases:   make([]canvasBundleManifestItem, 0, len(items)),
+	}
+	documents := make([][]byte, 0, len(items))
+	for i, item := range items {
+		fileName := fmt.Sprintf("canvases/%03d.json", i+1)
+		document, err := encodeCanvasDocument(item.Name, payloads[i], mapping)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		manifest.Canvases = append(manifest.Canvases, canvasBundleManifestItem{
+			File: fileName,
+			Name: normalizeName(item.Name),
+		})
+		documents = append(documents, document)
+	}
+
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	h.streamZip(c, "all-canvases.canvas.zip", func(writer *zip.Writer) error {
+		if err := writeZipBytes(writer, "manifest.json", manifestBytes); err != nil {
+			return err
+		}
+		for i, document := range documents {
+			if err := writeZipBytes(writer, manifest.Canvases[i].File, document); err != nil {
+				return err
+			}
+		}
+		return writeFetchedAssets(writer, fetched)
+	})
+}
+
+func (h *Handler) streamZip(c *gin.Context, filename string, write func(*zip.Writer) error) {
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", zipContentDisposition(filename))
+	c.Status(http.StatusOK)
+
+	writer := zip.NewWriter(c.Writer)
+	defer writer.Close()
+	_ = write(writer)
+}
+
+func (h *Handler) fetchAssets(ctx context.Context, payloads []string) (map[string]string, []fetchedAsset) {
+	seen := map[string]struct{}{}
+	var urls []string
+	for _, payload := range payloads {
+		for _, assetURL := range collectAssetURLs(payload, h.isOurAsset) {
+			if _, ok := seen[assetURL]; ok {
+				continue
+			}
+			seen[assetURL] = struct{}{}
+			urls = append(urls, assetURL)
+		}
+	}
+
+	fetched := make([]fetchedAsset, 0, len(urls))
+	mapping := make(map[string]string, len(urls))
+	for i, assetURL := range urls {
+		body, err := h.readAssetBytes(ctx, assetURL)
 		if err != nil || len(body) == 0 {
 			continue
 		}
@@ -59,46 +168,54 @@ func (h *Handler) writeExportZip(c *gin.Context, name, data string) {
 		mapping[assetURL] = zipPath
 		fetched = append(fetched, fetchedAsset{path: zipPath, data: body})
 	}
+	return mapping, fetched
+}
 
+func encodeCanvasDocument(name, payload string, mapping map[string]string) ([]byte, error) {
 	rewritten := replaceMappedStrings(payload, mapping)
-	document, err := json.MarshalIndent(canvasExportDocument{
+	used := usedAssetMapping(payload, mapping)
+	return json.MarshalIndent(canvasExportDocument{
 		Type:       canvasExportType,
 		Version:    canvasExportVersion,
 		Name:       normalizeName(name),
 		ExportedAt: time.Now().UTC().Format(time.RFC3339),
 		Data:       json.RawMessage([]byte(rewritten)),
-		Assets:     invertStringMap(mapping),
+		Assets:     used,
 	}, "", "  ")
+}
+
+func usedAssetMapping(payload string, mapping map[string]string) map[string]string {
+	if len(mapping) == 0 {
+		return nil
+	}
+	used := map[string]string{}
+	for originalURL, zipPath := range mapping {
+		if strings.Contains(payload, originalURL) {
+			used[originalURL] = zipPath
+		}
+	}
+	if len(used) == 0 {
+		return nil
+	}
+	return used
+}
+
+func writeZipBytes(writer *zip.Writer, name string, data []byte) error {
+	entry, err := writer.Create(name)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+		return err
 	}
+	_, err = entry.Write(data)
+	return err
+}
 
-	filename := sanitizeExportFileName(name) + ".canvas.zip"
-	c.Header("Content-Type", "application/zip")
-	c.Header("Content-Disposition", zipContentDisposition(filename))
-	c.Status(http.StatusOK)
-
-	writer := zip.NewWriter(c.Writer)
-	defer writer.Close()
-
-	jsonEntry, err := writer.Create("canvas.json")
-	if err != nil {
-		return
-	}
-	if _, err := jsonEntry.Write(document); err != nil {
-		return
-	}
-
+func writeFetchedAssets(writer *zip.Writer, fetched []fetchedAsset) error {
 	for _, asset := range fetched {
-		entry, err := writer.Create(asset.path)
-		if err != nil {
-			return
-		}
-		if _, err := entry.Write(asset.data); err != nil {
-			return
+		if err := writeZipBytes(writer, asset.path, asset.data); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
 func (h *Handler) readAssetBytes(ctx context.Context, assetURL string) ([]byte, error) {
@@ -117,13 +234,13 @@ func (h *Handler) readAssetBytes(ctx context.Context, assetURL string) ([]byte, 
 	return data, nil
 }
 
-func (h *Handler) importCanvasFile(c *gin.Context, file io.ReadSeeker, filename string, size int64) (string, string, error) {
+func (h *Handler) importCanvasFile(c *gin.Context, file io.ReadSeeker, filename string, size int64) (importedArchive, error) {
 	magic := make([]byte, 4)
 	if _, err := io.ReadFull(file, magic); err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return "", "", err
+		return importedArchive{}, err
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return "", "", err
+		return importedArchive{}, err
 	}
 
 	if isZipMagic(magic) || strings.HasSuffix(strings.ToLower(filename), ".zip") {
@@ -132,70 +249,129 @@ func (h *Handler) importCanvasFile(c *gin.Context, file io.ReadSeeker, filename 
 		}
 		body, err := io.ReadAll(io.LimitReader(file, h.maxImportSize+1))
 		if err != nil {
-			return "", "", err
+			return importedArchive{}, err
 		}
 		if int64(len(body)) > h.maxImportSize {
-			return "", "", errors.New("zip exceeds 200MB limit")
+			return importedArchive{}, errors.New("zip exceeds 200MB limit")
 		}
 		return h.importZip(c, bytes.NewReader(body), int64(len(body)))
 	}
 
 	body, err := io.ReadAll(io.LimitReader(file, h.maxImportSize+1))
 	if err != nil {
-		return "", "", err
+		return importedArchive{}, err
 	}
 	if int64(len(body)) > h.maxImportSize {
-		return "", "", errors.New("file exceeds 200MB limit")
+		return importedArchive{}, errors.New("file exceeds 200MB limit")
 	}
-	return parseImportedCanvasDocument(body, filename)
+	name, data, err := parseImportedCanvasDocument(body, filename)
+	if err != nil {
+		return importedArchive{}, err
+	}
+	return importedArchive{items: []importedCanvas{{Name: name, Data: data}}}, nil
 }
 
-func (h *Handler) importZip(c *gin.Context, file io.ReaderAt, size int64) (string, string, error) {
+func (h *Handler) importZip(c *gin.Context, file io.ReaderAt, size int64) (importedArchive, error) {
 	reader, err := zip.NewReader(file, size)
 	if err != nil {
-		return "", "", errors.New("invalid zip file")
+		return importedArchive{}, errors.New("invalid zip file")
 	}
 	if len(reader.File) > maxZipFiles {
-		return "", "", errors.New("zip contains too many files")
+		return importedArchive{}, errors.New("zip contains too many files")
 	}
 
-	var canvasFile *zip.File
-	assetFiles := make(map[string]*zip.File, len(reader.File))
+	filesByName := map[string]*zip.File{}
+	assetFiles := map[string]*zip.File{}
+	var canvasFiles []string
 	for _, entry := range reader.File {
 		name := zipEntryName(entry.Name)
 		if name == "" || strings.HasSuffix(name, "/") {
 			continue
 		}
-		if name == "canvas.json" || strings.HasSuffix(name, ".canvas.json") {
-			canvasFile = entry
-			continue
-		}
+		filesByName[name] = entry
 		if strings.HasPrefix(name, "assets/") {
 			assetFiles[name] = entry
 		}
+		if strings.HasPrefix(name, "canvases/") && strings.HasSuffix(strings.ToLower(name), ".json") {
+			canvasFiles = append(canvasFiles, name)
+		}
 	}
+
+	replacements, err := h.uploadZipAssets(c, assetFiles)
+	if err != nil {
+		return importedArchive{}, err
+	}
+
+	if isBundleArchive(filesByName, canvasFiles) {
+		paths := bundleCanvasPaths(filesByName, canvasFiles)
+		if len(paths) == 0 {
+			return importedArchive{}, errors.New("zip does not contain canvases")
+		}
+		items := make([]importedCanvas, 0, len(paths))
+		for _, zipPath := range paths {
+			entry := filesByName[zipPath]
+			if entry == nil {
+				return importedArchive{}, fmt.Errorf("missing %s", zipPath)
+			}
+			item, err := h.importZipCanvas(entry, replacements)
+			if err != nil {
+				return importedArchive{}, err
+			}
+			items = append(items, item)
+		}
+		return importedArchive{items: items, bundle: true}, nil
+	}
+
+	canvasFile := filesByName["canvas.json"]
 	if canvasFile == nil {
 		for _, entry := range reader.File {
 			name := zipEntryName(entry.Name)
-			if strings.HasSuffix(strings.ToLower(name), ".json") {
+			if strings.HasSuffix(name, ".canvas.json") || strings.HasSuffix(strings.ToLower(name), ".json") {
 				canvasFile = entry
 				break
 			}
 		}
 	}
 	if canvasFile == nil {
-		return "", "", errors.New("zip does not contain canvas.json")
+		return importedArchive{}, errors.New("zip does not contain canvas.json")
+	}
+	item, err := h.importZipCanvas(canvasFile, replacements)
+	if err != nil {
+		return importedArchive{}, err
+	}
+	return importedArchive{items: []importedCanvas{item}}, nil
+}
+
+func (h *Handler) importZipCanvas(entry *zip.File, replacements map[string]string) (importedCanvas, error) {
+	canvasBody, err := readZipFile(entry, h.maxImportSize)
+	if err != nil {
+		return importedCanvas{}, err
+	}
+	name, data, err := parseImportedCanvasDocument(canvasBody, entry.Name)
+	if err != nil {
+		return importedCanvas{}, err
 	}
 
-	canvasBody, err := readZipFile(canvasFile, h.maxImportSize)
-	if err != nil {
-		return "", "", err
+	merged := map[string]string{}
+	for key, value := range replacements {
+		merged[key] = value
 	}
-	name, data, err := parseImportedCanvasDocument(canvasBody, canvasFile.Name)
-	if err != nil {
-		return "", "", err
+	var document canvasExportDocument
+	if json.Unmarshal(canvasBody, &document) == nil {
+		for originalURL, zipPath := range document.Assets {
+			if newURL, ok := replacements[zipPath]; ok {
+				merged[originalURL] = newURL
+			}
+		}
 	}
 
+	return importedCanvas{
+		Name: name,
+		Data: replaceMappedStrings(data, merged),
+	}, nil
+}
+
+func (h *Handler) uploadZipAssets(c *gin.Context, assetFiles map[string]*zip.File) (map[string]string, error) {
 	replacements := map[string]string{}
 	keys := make([]string, 0, len(assetFiles))
 	for key := range assetFiles {
@@ -207,26 +383,59 @@ func (h *Handler) importZip(c *gin.Context, file io.ReaderAt, size int64) (strin
 		entry := assetFiles[zipPath]
 		body, err := readZipFile(entry, maxUncompressedAsset)
 		if err != nil {
-			return "", "", fmt.Errorf("read %s: %w", zipPath, err)
+			return nil, fmt.Errorf("read %s: %w", zipPath, err)
 		}
 		publicURL, err := h.storeImportedAsset(c, path.Base(zipPath), body)
 		if err != nil {
-			return "", "", fmt.Errorf("store %s: %w", zipPath, err)
+			return nil, fmt.Errorf("store %s: %w", zipPath, err)
 		}
 		replacements[zipPath] = publicURL
 		replacements[path.Base(zipPath)] = publicURL
 	}
+	return replacements, nil
+}
 
-	var document canvasExportDocument
-	if json.Unmarshal(canvasBody, &document) == nil {
-		for originalURL, zipPath := range document.Assets {
-			if newURL, ok := replacements[zipPath]; ok {
-				replacements[originalURL] = newURL
+func isBundleArchive(filesByName map[string]*zip.File, canvasFiles []string) bool {
+	if len(canvasFiles) > 0 {
+		return true
+	}
+	manifestFile := filesByName["manifest.json"]
+	if manifestFile == nil {
+		return false
+	}
+	body, err := readZipFile(manifestFile, 1<<20)
+	if err != nil {
+		return false
+	}
+	var manifest canvasBundleManifest
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return false
+	}
+	return manifest.Type == canvasBundleType || len(manifest.Canvases) > 0
+}
+
+func bundleCanvasPaths(filesByName map[string]*zip.File, canvasFiles []string) []string {
+	manifestFile := filesByName["manifest.json"]
+	if manifestFile != nil {
+		if body, err := readZipFile(manifestFile, 1<<20); err == nil {
+			var manifest canvasBundleManifest
+			if json.Unmarshal(body, &manifest) == nil && len(manifest.Canvases) > 0 {
+				paths := make([]string, 0, len(manifest.Canvases))
+				for _, item := range manifest.Canvases {
+					name := zipEntryName(item.File)
+					if name == "" {
+						continue
+					}
+					paths = append(paths, name)
+				}
+				if len(paths) > 0 {
+					return paths
+				}
 			}
 		}
 	}
-
-	return name, replaceMappedStrings(data, replacements), nil
+	sort.Strings(canvasFiles)
+	return canvasFiles
 }
 
 func (h *Handler) storeImportedAsset(c *gin.Context, filename string, data []byte) (string, error) {
@@ -605,17 +814,6 @@ func zipContentDisposition(filename string) string {
 		ascii = "canvas.zip"
 	}
 	return fmt.Sprintf(`attachment; filename="%s"; filename*=UTF-8''%s`, ascii, escaped)
-}
-
-func invertStringMap(input map[string]string) map[string]string {
-	if len(input) == 0 {
-		return nil
-	}
-	output := make(map[string]string, len(input))
-	for key, value := range input {
-		output[key] = value
-	}
-	return output
 }
 
 func normalizeImportedCanvasName(name, fallback string) string {
