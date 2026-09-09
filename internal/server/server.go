@@ -18,31 +18,39 @@ import (
 func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 	authStore := auth.NewStore(db, cfg.SessionTTL)
 
+	var s3Client *s3.Client
+	var s3Endpoint string
+	var s3Bucket string
 	var authHandler *auth.Handler
 	if cfg.S3 != nil {
-		s3Client, err := s3.NewClient(cfg.S3)
+		client, err := s3.NewClient(cfg.S3)
 		if err != nil {
 			log.Fatalf("create s3 client: %v", err)
 		}
-		authHandler = auth.NewHandlerWithS3(authStore, cfg.UploadDir, s3Client, cfg.S3.Endpoint)
+		s3Client = client
+		s3Endpoint = cfg.S3.Endpoint
+		s3Bucket = cfg.S3.Bucket
+		authHandler = auth.NewHandlerWithS3(authStore, cfg.UploadDir, s3Client, s3Endpoint)
 	} else {
 		authHandler = auth.NewHandler(authStore, cfg.UploadDir)
 	}
-	canvasHandler := canvas.NewHandler(canvas.NewStore(db))
+
+	canvasStore := canvas.NewStore(db)
+	var assetClient canvas.AssetClient
+	if s3Client != nil {
+		assetClient = s3Client
+	}
+	canvasHandler := canvas.NewHandler(canvasStore, cfg.UploadDir, assetClient, s3Endpoint, s3Bucket)
 
 	var uploadHandler *upload.Handler
-	if cfg.S3 != nil {
-		s3Client, err := s3.NewClient(cfg.S3)
-		if err != nil {
-			log.Fatalf("create s3 client: %v", err)
-		}
-		uploadHandler = upload.NewHandlerWithS3(cfg.UploadDir, cfg.MaxUploadSize, s3Client, cfg.S3.Endpoint)
+	if s3Client != nil {
+		uploadHandler = upload.NewHandlerWithS3(cfg.UploadDir, cfg.MaxUploadSize, s3Client, s3Endpoint)
 	} else {
 		uploadHandler = upload.NewHandler(cfg.UploadDir, cfg.MaxUploadSize)
 	}
 
 	router := gin.Default()
-	router.MaxMultipartMemory = cfg.MaxUploadSize
+	router.MaxMultipartMemory = 200 << 20
 	router.Use(cors(cfg.FrontendOrigin))
 
 	router.GET("/api/health", func(c *gin.Context) {
@@ -67,7 +75,10 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 
 			protected.GET("/canvases", canvasHandler.List)
 			protected.POST("/canvases", canvasHandler.Create)
+			protected.POST("/canvases/export", canvasHandler.ExportSnapshot)
+			protected.POST("/canvases/import", canvasHandler.Import)
 			protected.GET("/canvases/:id", canvasHandler.Get)
+			protected.GET("/canvases/:id/export", canvasHandler.Export)
 			protected.GET("/canvases/:id/stream", canvasHandler.Stream)
 			protected.POST("/canvases/:id/lock", canvasHandler.AcquireLock)
 			protected.DELETE("/canvases/:id/lock", canvasHandler.ReleaseLock)

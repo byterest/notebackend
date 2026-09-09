@@ -1,6 +1,7 @@
 package canvas
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -18,17 +19,43 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// AssetClient is the S3-compatible storage used when exporting and importing canvases.
+type AssetClient interface {
+	Upload(ctx context.Context, key string, reader io.Reader, contentType string) (string, error)
+	Download(ctx context.Context, key string) (io.ReadCloser, string, error)
+	PublicURL(endpoint string, key string) string
+}
+
 // Handler exposes canvas HTTP endpoints.
 type Handler struct {
-	store *Store
+	store         *Store
+	uploadDir     string
+	maxImportSize int64
+	s3Client      AssetClient
+	s3Endpoint    string
+	s3Bucket      string
+	httpClient    *http.Client
 }
 
 const contentChunkSize = 30
 const canvasLockTTL = 30 * time.Second
+const maxZipImportSize = 200 << 20
+const maxZipFiles = 500
+const maxUncompressedAsset = 50 << 20
 
 // NewHandler creates a canvas handler.
-func NewHandler(store *Store) *Handler {
-	return &Handler{store: store}
+func NewHandler(store *Store, uploadDir string, s3Client AssetClient, s3Endpoint, s3Bucket string) *Handler {
+	return &Handler{
+		store:         store,
+		uploadDir:     uploadDir,
+		maxImportSize: maxZipImportSize,
+		s3Client:      s3Client,
+		s3Endpoint:    strings.TrimRight(s3Endpoint, "/"),
+		s3Bucket:      strings.Trim(s3Bucket, "/"),
+		httpClient: &http.Client{
+			Timeout: 60 * time.Second,
+		},
+	}
 }
 
 // List returns canvases for the current user.
@@ -373,6 +400,94 @@ func (h *Handler) Delete(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// Export downloads a persisted canvas as a zip that includes stored assets.
+func (h *Handler) Export(c *gin.Context) {
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	id, err := parseID(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid canvas id"})
+		return
+	}
+
+	item, err := h.store.Get(c.Request.Context(), user.ID, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "canvas not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	h.writeExportZip(c, item.Name, item.Data)
+}
+
+// ExportSnapshot downloads the provided canvas JSON as a zip that includes stored assets.
+func (h *Handler) ExportSnapshot(c *gin.Context) {
+	if _, ok := auth.CurrentUser(c); !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	var request struct {
+		Name string `json:"name"`
+		Data string `json:"data"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	h.writeExportZip(c, normalizeName(request.Name), normalizeData(request.Data))
+}
+
+// Import creates a canvas from a .canvas.zip or legacy .canvas.json file.
+func (h *Handler) Import(c *gin.Context) {
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxImportSize)
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "file is required"})
+		return
+	}
+	if fileHeader.Size > h.maxImportSize {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "zip exceeds 200MB limit"})
+		return
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	defer file.Close()
+
+	name, data, err := h.importCanvasFile(c, file, fileHeader.Filename, fileHeader.Size)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	item, err := h.store.Create(c.Request.Context(), user.ID, normalizeName(name), normalizeData(data))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"data": item})
 }
 
 func parseID(raw string) (int64, error) {

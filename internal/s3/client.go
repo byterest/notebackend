@@ -93,6 +93,23 @@ func (c *Client) Upload(ctx context.Context, key string, reader io.Reader, conte
 	return key, nil
 }
 
+// Download fetches an object from S3.
+func (c *Client) Download(ctx context.Context, key string) (io.ReadCloser, string, error) {
+	out, err := c.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("s3 download failed: %w", err)
+	}
+
+	contentType := ""
+	if out.ContentType != nil {
+		contentType = *out.ContentType
+	}
+	return out.Body, contentType, nil
+}
+
 // Delete removes an object from S3.
 func (c *Client) Delete(ctx context.Context, key string) error {
 	_, err := c.client.DeleteObject(ctx, &s3.DeleteObjectInput{
