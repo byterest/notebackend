@@ -8,8 +8,9 @@ import (
 )
 
 var (
-	ErrCanvasLocked = errors.New("canvas is locked")
-	ErrInvalidLock  = errors.New("invalid canvas lock")
+	ErrCanvasLocked   = errors.New("canvas is locked")
+	ErrInvalidLock    = errors.New("invalid canvas lock")
+	ErrFolderNotFound = errors.New("folder not found")
 )
 
 // Store handles canvas persistence.
@@ -25,7 +26,7 @@ func NewStore(db *sql.DB) *Store {
 // List returns canvases owned by a user.
 func (s *Store) List(ctx context.Context, userID int64) ([]Canvas, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, user_id, name, data, created_at, updated_at
+		SELECT id, user_id, folder_id, name, data, created_at, updated_at
 		FROM canvases
 		WHERE user_id = $1
 		ORDER BY updated_at DESC, id DESC
@@ -47,11 +48,18 @@ func (s *Store) List(ctx context.Context, userID int64) ([]Canvas, error) {
 }
 
 // Create inserts a new canvas for a user.
-func (s *Store) Create(ctx context.Context, userID int64, name, data string) (Canvas, error) {
+func (s *Store) Create(ctx context.Context, userID int64, name, data string, folderID *int64) (Canvas, error) {
+	if folderID != nil {
+		if _, err := s.GetFolder(ctx, userID, *folderID); err != nil {
+			return Canvas{}, err
+		}
+	}
+
 	var id int64
 	err := s.db.QueryRowContext(ctx,
-		`INSERT INTO canvases (user_id, name, data) VALUES ($1, $2, $3) RETURNING id`,
+		`INSERT INTO canvases (user_id, folder_id, name, data) VALUES ($1, $2, $3, $4) RETURNING id`,
 		userID,
+		folderID,
 		name,
 		data,
 	).Scan(&id)
@@ -65,7 +73,7 @@ func (s *Store) Create(ctx context.Context, userID int64, name, data string) (Ca
 // Get fetches a canvas owned by a user.
 func (s *Store) Get(ctx context.Context, userID, id int64) (Canvas, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, name, data, created_at, updated_at
+		SELECT id, user_id, folder_id, name, data, created_at, updated_at
 		FROM canvases
 		WHERE id = $1 AND user_id = $2
 	`, id, userID)
@@ -195,10 +203,125 @@ func (s *Store) Delete(ctx context.Context, userID, id int64) (bool, error) {
 	return affected > 0, nil
 }
 
+// ListFolders returns folders owned by a user.
+func (s *Store) ListFolders(ctx context.Context, userID int64) ([]Folder, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, user_id, name, created_at, updated_at
+		FROM folders
+		WHERE user_id = $1
+		ORDER BY name ASC, id ASC
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]Folder, 0)
+	for rows.Next() {
+		item, scanErr := scanFolder(rows.Scan)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// GetFolder fetches a folder owned by a user.
+func (s *Store) GetFolder(ctx context.Context, userID, id int64) (Folder, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, user_id, name, created_at, updated_at
+		FROM folders
+		WHERE id = $1 AND user_id = $2
+	`, id, userID)
+	item, err := scanFolder(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Folder{}, ErrFolderNotFound
+	}
+	return item, err
+}
+
+// CreateFolder inserts a folder for a user.
+func (s *Store) CreateFolder(ctx context.Context, userID int64, name string) (Folder, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx,
+		`INSERT INTO folders (user_id, name) VALUES ($1, $2) RETURNING id`,
+		userID,
+		name,
+	).Scan(&id)
+	if err != nil {
+		return Folder{}, err
+	}
+	return s.GetFolder(ctx, userID, id)
+}
+
+// UpdateFolder renames a folder.
+func (s *Store) UpdateFolder(ctx context.Context, userID, id int64, name string) (Folder, error) {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE folders
+		SET name = $1, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $2 AND user_id = $3
+	`, name, id, userID)
+	if err != nil {
+		return Folder{}, err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return Folder{}, ErrFolderNotFound
+	}
+	return s.GetFolder(ctx, userID, id)
+}
+
+// DeleteFolder removes a folder. Canvases in it become unfiled.
+func (s *Store) DeleteFolder(ctx context.Context, userID, id int64) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM folders WHERE id = $1 AND user_id = $2`, id, userID)
+	if err != nil {
+		return false, err
+	}
+	affected, _ := result.RowsAffected()
+	return affected > 0, nil
+}
+
+// SetCanvasFolder moves a canvas into a folder or back to the root.
+func (s *Store) SetCanvasFolder(ctx context.Context, userID, canvasID int64, folderID *int64) (Canvas, error) {
+	if folderID != nil {
+		if _, err := s.GetFolder(ctx, userID, *folderID); err != nil {
+			return Canvas{}, err
+		}
+	}
+
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE canvases
+		SET folder_id = $1, updated_at = CURRENT_TIMESTAMP
+		WHERE id = $2 AND user_id = $3
+	`, folderID, canvasID, userID)
+	if err != nil {
+		return Canvas{}, err
+	}
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		return Canvas{}, sql.ErrNoRows
+	}
+	return s.Get(ctx, userID, canvasID)
+}
+
 func scanCanvas(scan func(dest ...any) error) (Canvas, error) {
 	var item Canvas
-	if err := scan(&item.ID, &item.UserID, &item.Name, &item.Data, &item.CreatedAt, &item.UpdatedAt); err != nil {
+	var folderID sql.NullInt64
+	if err := scan(&item.ID, &item.UserID, &folderID, &item.Name, &item.Data, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		return Canvas{}, err
+	}
+	if folderID.Valid {
+		id := folderID.Int64
+		item.FolderID = &id
+	}
+	return item, nil
+}
+
+func scanFolder(scan func(dest ...any) error) (Folder, error) {
+	var item Folder
+	if err := scan(&item.ID, &item.UserID, &item.Name, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		return Folder{}, err
 	}
 	return item, nil
 }

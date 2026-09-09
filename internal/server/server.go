@@ -73,6 +73,11 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 			protected.POST("/auth/avatar", authHandler.UploadAvatar)
 			protected.DELETE("/auth/avatar", authHandler.DeleteAvatar)
 
+			protected.GET("/folders", canvasHandler.ListFolders)
+			protected.POST("/folders", canvasHandler.CreateFolder)
+			protected.PUT("/folders/:id", canvasHandler.UpdateFolder)
+			protected.DELETE("/folders/:id", canvasHandler.DeleteFolder)
+
 			protected.GET("/canvases", canvasHandler.List)
 			protected.POST("/canvases", canvasHandler.Create)
 			protected.POST("/canvases/export", canvasHandler.ExportSnapshot)
@@ -83,6 +88,7 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 			protected.GET("/canvases/:id/stream", canvasHandler.Stream)
 			protected.POST("/canvases/:id/lock", canvasHandler.AcquireLock)
 			protected.DELETE("/canvases/:id/lock", canvasHandler.ReleaseLock)
+			protected.PATCH("/canvases/:id/folder", canvasHandler.SetCanvasFolder)
 			protected.PUT("/canvases/:id", canvasHandler.Update)
 			protected.DELETE("/canvases/:id", canvasHandler.Delete)
 			protected.POST("/uploads/images", uploadHandler.Image)
@@ -96,7 +102,7 @@ func NewRouter(cfg config.Config, db *sql.DB) *gin.Engine {
 func cors(origin string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", origin)
-		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 		c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		if c.Request.Method == http.MethodOptions {
 			c.AbortWithStatus(http.StatusNoContent)

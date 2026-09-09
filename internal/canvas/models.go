@@ -5,17 +5,28 @@ import "time"
 const (
 	defaultCanvasName = "Untitled Canvas"
 	defaultCanvasData = `{"nodes":[],"edges":[],"viewport":{"x":0,"y":0,"zoom":1}}`
+	defaultFolderName = "Untitled Folder"
 )
 
 // Canvas is a persisted note canvas.
 type Canvas struct {
 	ID        int64          `json:"id"`
 	UserID    int64          `json:"user_id"`
+	FolderID  *int64         `json:"folder_id"`
 	Name      string         `json:"name"`
 	Data      string         `json:"data,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`
 	Preview   map[string]any `json:"preview,omitempty"`
+}
+
+// Folder is a one-level grouping of canvases.
+type Folder struct {
+	ID        int64     `json:"id"`
+	UserID    int64     `json:"user_id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // CanvasLock is an editing lease for one user's canvas.

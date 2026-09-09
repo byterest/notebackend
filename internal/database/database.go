@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS canvases (
 	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS folders (
+	id SERIAL PRIMARY KEY,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	name TEXT NOT NULL DEFAULT 'Untitled Folder',
+	created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS canvas_locks (
 	canvas_id INTEGER NOT NULL REFERENCES canvases(id) ON DELETE CASCADE,
 	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -82,6 +90,13 @@ BEGIN
     ) THEN
         ALTER TABLE users ADD COLUMN avatar_url TEXT;
     END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'canvases' AND column_name = 'folder_id'
+    ) THEN
+        ALTER TABLE canvases ADD COLUMN folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL;
+    END IF;
 END $$;
 `
 
@@ -90,4 +105,6 @@ CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_canvases_user_updated ON canvases(user_id, updated_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_canvas_locks_expires_at ON canvas_locks(expires_at);
+CREATE INDEX IF NOT EXISTS idx_folders_user ON folders(user_id, updated_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_canvases_user_folder ON canvases(user_id, folder_id);
 `

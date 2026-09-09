@@ -89,16 +89,21 @@ func (h *Handler) Create(c *gin.Context) {
 	}
 
 	var request struct {
-		Name string `json:"name"`
-		Data string `json:"data"`
+		Name     string `json:"name"`
+		Data     string `json:"data"`
+		FolderID *int64 `json:"folder_id"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil && !errors.Is(err, io.EOF) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
 
-	item, err := h.store.Create(c.Request.Context(), user.ID, normalizeName(request.Name), normalizeData(request.Data))
+	item, err := h.store.Create(c.Request.Context(), user.ID, normalizeName(request.Name), normalizeData(request.Data), request.FolderID)
 	if err != nil {
+		if errors.Is(err, ErrFolderNotFound) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "folder not found"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -508,7 +513,7 @@ func (h *Handler) Import(c *gin.Context) {
 
 	created := make([]Canvas, 0, len(imported.items))
 	for _, item := range imported.items {
-		canvas, err := h.store.Create(c.Request.Context(), user.ID, normalizeName(item.Name), normalizeData(item.Data))
+		canvas, err := h.store.Create(c.Request.Context(), user.ID, normalizeName(item.Name), normalizeData(item.Data), nil)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return

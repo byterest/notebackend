@@ -43,7 +43,7 @@ func newLockTestStore(t *testing.T) (*Store, int64, int64) {
 	}
 
 	store := NewStore(db)
-	item, err := store.Create(context.Background(), userID, "Test Canvas", defaultCanvasData)
+	item, err := store.Create(context.Background(), userID, "Test Canvas", defaultCanvasData, nil)
 	if err != nil {
 		t.Fatalf("create canvas: %v", err)
 	}
@@ -68,9 +68,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS folders (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	name TEXT NOT NULL DEFAULT 'Untitled Folder',
+	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS canvases (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
 	user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+	folder_id INTEGER REFERENCES folders(id) ON DELETE SET NULL,
 	name TEXT NOT NULL DEFAULT 'Untitled Canvas',
 	data TEXT NOT NULL DEFAULT '{"nodes":[],"edges":[],"viewport":{"x":0,"y":0,"zoom":1}}',
 	created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
